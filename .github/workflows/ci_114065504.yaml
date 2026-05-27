@@ -1,0 +1,145 @@
+name: HW4 CI
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+  prettier:
+    name: Prettier check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Prettier check
+        run: npm run format:check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with JUnit report
+        run: |
+          mkdir -p reports
+          npm test -- --reporter=default --reporter=junit --outputFile.junit=reports/vitest-junit.xml
+
+      - name: Publish test summary
+        if: always()
+        shell: bash
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const reportPath = 'reports/vitest-junit.xml';
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+
+          if (!summaryPath) {
+            process.exit(0);
+          }
+
+          if (!fs.existsSync(reportPath)) {
+            fs.appendFileSync(
+              summaryPath,
+              '## Vitest test results\n\nNo JUnit report was generated.\n'
+            );
+            process.exit(0);
+          }
+
+          const xml = fs.readFileSync(reportPath, 'utf8');
+
+          function attributes(source) {
+            return Object.fromEntries(
+              [...source.matchAll(/\s([\w:-]+)="([^"]*)"/g)].map((match) => [match[1], match[2]])
+            );
+          }
+
+          const suites = [...xml.matchAll(/<testsuite\b([^>]*)>/g)].map((match) =>
+            attributes(match[1])
+          );
+
+          const totals = suites.reduce(
+            (acc, suite) => ({
+              tests: acc.tests + Number(suite.tests || 0),
+              failures: acc.failures + Number(suite.failures || 0),
+              errors: acc.errors + Number(suite.errors || 0),
+              skipped: acc.skipped + Number(suite.skipped || 0),
+              time: acc.time + Number(suite.time || 0)
+            }),
+            { tests: 0, failures: 0, errors: 0, skipped: 0, time: 0 }
+          );
+
+          const failedCases = [...xml.matchAll(/<testcase\b([^>]*)>([\s\S]*?)<\/testcase>/g)]
+            .map((match) => ({ attrs: attributes(match[1]), body: match[2] }))
+            .filter((testCase) => /<(failure|error)\b/.test(testCase.body))
+            .map((testCase) =>
+              [testCase.attrs.classname, testCase.attrs.name].filter(Boolean).join(' - ')
+            );
+
+          const lines = [
+            '## Vitest test results',
+            '',
+            '| Tests | Failures | Errors | Skipped | Time |',
+            '| ---: | ---: | ---: | ---: | ---: |',
+            `| ${totals.tests} | ${totals.failures} | ${totals.errors} | ${totals.skipped} | ${totals.time.toFixed(3)}s |`,
+            ''
+          ];
+
+          if (failedCases.length > 0) {
+            lines.push('### Failed tests', '', ...failedCases.map((name) => `- ${name}`), '');
+          }
+
+          fs.appendFileSync(summaryPath, `${lines.join('\n')}\n`);
+          EOF
+
+      - name: Upload JUnit test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vitest-junit-report
+          path: reports/vitest-junit.xml
+          if-no-files-found: warn
